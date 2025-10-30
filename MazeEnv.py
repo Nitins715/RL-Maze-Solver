@@ -14,26 +14,51 @@ class MazeEnv:
         3: (1, 0)    # DOWN (South)
     }
 
-    def __init__(self, preprocessor_instance):
-        """Initializes the environment using the preprocessed grid."""
+    def __init__(self, preprocessor_instance, start_coords=None, goal_coords=None):
+        """
+        Initializes the environment using the preprocessed grid.
+        
+        Args:
+            preprocessor_instance: Instance of the Preprocess class.
+            start_coords (tuple, optional): Custom (r, c) start coordinates. 
+                                            If None, uses preprocessor's default.
+            goal_coords (tuple, optional): Custom (r, c) goal coordinates.
+                                           If None, uses preprocessor's default.
+        """
         if not hasattr(preprocessor_instance, 'nim') or preprocessor_instance.nim is None:
             raise ValueError("Invalid Preprocess instance or grid not generated.")
             
         self.maze = preprocessor_instance.nim.copy()
         self.height, self.width = self.maze.shape
-        self.start_coords = None
-        self.goal_coords = None
         self.current_state = None
 
+        # --- NEW LOGIC TO HANDLE CUSTOM COORDINATES ---
+        
+        # 1. Get default coordinates from preprocessor
+        default_start = None
+        default_goal = None
         if preprocessor_instance.loc and len(preprocessor_instance.loc) == 4:
-            self.start_coords = (preprocessor_instance.loc[0], preprocessor_instance.loc[1])
-            self.goal_coords = (preprocessor_instance.loc[2], preprocessor_instance.loc[3])
+            default_start = (preprocessor_instance.loc[0], preprocessor_instance.loc[1])
+            default_goal = (preprocessor_instance.loc[2], preprocessor_instance.loc[3])
         else:
-            raise ValueError("Start/Goal coordinates not properly detected in the preprocessed maze.")
+            # Only raise error if custom points are ALSO not provided
+            if start_coords is None or goal_coords is None:
+                raise ValueError("Start/Goal coordinates not properly detected and custom coordinates not provided.")
 
-        self.REWARD_GOAL = 10.0      # High positive reward for reaching the goal (1.0)
-        self.REWARD_STEP = -0.04     # Small negative reward for each step (encourages efficiency)
-        self.REWARD_WALL = -1.0      # Negative reward for hitting a wall (-1.0)
+        # 2. Set the final start and goal coordinates
+        # Use custom coordinates if provided, otherwise use the detected defaults
+        self.start_coords = start_coords if start_coords is not None else default_start
+        self.goal_coords = goal_coords if goal_coords is not None else default_goal
+        
+        # Final check to ensure we have valid coordinates
+        if self.start_coords is None or self.goal_coords is None:
+             raise RuntimeError("Maze environment failed to initialize start or goal coordinates.")
+
+        # --- END NEW LOGIC ---
+
+        self.REWARD_GOAL = 10.0      
+        self.REWARD_STEP = -0.04     
+        self.REWARD_WALL = -1.0      
 
     def reset(self):
         """Resets the agent to the starting position."""
@@ -72,7 +97,8 @@ class MazeEnv:
             self.current_state = (new_r, new_c)
             new_state = self.current_state
             
-            if new_cell_value == 1.0: # Goal reached
+            # Check if the new state matches the goal coordinates (important for custom goals)
+            if new_state == self.goal_coords: 
                 reward = self.REWARD_GOAL
                 done = True
             else: # Path movement
@@ -92,3 +118,4 @@ class MazeEnv:
         This is an admissible (never overestimates) heuristic for grid movement.
         """
         return np.sqrt((a[0] - b[0])**2 + (a[1] - b[1])**2)
+    
