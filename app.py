@@ -4,6 +4,8 @@ import numpy as np
 import time
 import os
 import matplotlib.pyplot as plt 
+import io
+from PIL import Image as PILImage
 
 # --- Import your core modules ---
 # Ensure these files are accessible in the same directory or Python path
@@ -163,23 +165,88 @@ def plot_path_on_maze(maze_grid, path, start_coords, goal_coords, title, path_ty
     
     st.pyplot(fig)
 
+
+def create_path_gif(maze_grid, path, start_coords, goal_coords, path_type, duration=200, figsize=(4,4)):
+    """Create an animated GIF (bytes) that shows the path being drawn step-by-step.
+
+    Returns raw GIF bytes suitable for passing to Streamlit's st.image.
+    """
+    if not path:
+        return None
+
+    frames = []
+    start_r, start_c = start_coords
+    goal_r, goal_c = goal_coords
+
+    # Precompute color based on type
+    color = 'red' if path_type == 'Pathfinding' else 'blue'
+
+    for step in range(1, len(path) + 1):
+        subpath = path[:step]
+
+        fig, ax = plt.subplots(figsize=figsize)
+        ax.imshow(maze_grid, aspect='equal', vmin=-1.0, vmax=2.0)
+
+        path_rows = [r for r, c in subpath]
+        path_cols = [c for r, c in subpath]
+
+        ax.plot(path_cols, path_rows, color=color, linewidth=2, marker='.',
+                 markersize=5, markerfacecolor='yellow', markeredgecolor='black')
+
+        ax.scatter(start_c, start_r, marker='D', color='lime', s=80, edgecolors='black')
+        ax.scatter(goal_c, goal_r, marker='*', color='gold', s=140, edgecolors='black')
+
+        ax.set_xticks([])
+        ax.set_yticks([])
+        plt.tight_layout()
+
+        buf = io.BytesIO()
+        plt.savefig(buf, format='png', bbox_inches='tight', dpi=80)
+        plt.close(fig)
+        buf.seek(0)
+
+        # Convert to PIL image (ensure consistent mode)
+        img = PILImage.open(buf).convert('RGBA')
+        frames.append(img)
+        buf.close()
+
+    # Convert RGBA frames to P mode for GIF compatibility
+    pal_frames = [f.convert('P', palette=PILImage.ADAPTIVE) for f in frames]
+
+    gif_buf = io.BytesIO()
+    try:
+        pal_frames[0].save(gif_buf, format='GIF', save_all=True, append_images=pal_frames[1:], duration=duration, loop=0)
+    except Exception:
+        # Fallback: try saving RGBA (some PIL versions accept it)
+        frames[0].save(gif_buf, format='GIF', save_all=True, append_images=frames[1:], duration=duration, loop=0)
+
+    gif_buf.seek(0)
+    return gif_buf.getvalue()
+
 # ----------------------------------------------------------------------------------
 ## 🌐 Streamlit UI and Main Logic
 # ----------------------------------------------------------------------------------
 
 def main():
-    st.set_page_config(layout="wide", page_title="RL vs Pathfinding Maze Solver")
-    st.title("🤖 RL vs Pathfinding Maze Solver Comparison")
+    st.set_page_config(layout="wide", page_title="RL Pathfinding Maze Solver")
+    st.title("🤖 RL Pathfinding Maze Solver")
     st.markdown("---")
 
+    # Allow users to either upload a maze image or select one from the Mazes folder
     maze_files = load_maze_files()
-    if not maze_files:
-        st.error("❌ Maze files not found. Please ensure your maze images are in a folder named 'Mazes'.")
-        return
 
-    # --- Sidebar Configuration ---
     st.sidebar.header("Configuration")
-    selected_maze = st.sidebar.selectbox("1. Select Maze File", maze_files)
+    uploaded_file = st.sidebar.file_uploader("Upload Maze Image (PNG/JPG)", type=['png', 'jpg', 'jpeg'])
+
+    selected_maze = None
+    if uploaded_file is None:
+        # No upload: fall back to selecting a file from the Mazes directory
+        if not maze_files:
+            st.error("❌ No maze files found in 'Mazes' and no file uploaded. Please upload a maze image or add images to the 'Mazes' folder.")
+            return
+        selected_maze = st.sidebar.selectbox("1. Select Maze File", maze_files)
+    else:
+        st.sidebar.success(f"Uploaded: {uploaded_file.name}")
     
     # Initialize variables for scoping and sidebar input capture
     num_episodes = NUM_EPISODES
@@ -196,10 +263,17 @@ def main():
     st.sidebar.markdown("---")
     
     # --- Preprocessing & Environment Setup (Initial) ---
-    st.info(f"Loading maze: {selected_maze}")
-    maze_path = os.path.join(MAZE_DIR, selected_maze)
-    pre = Preprocess(maze_path)
+    # --- Preprocessing & Environment Setup (Initial) ---
+    if uploaded_file is not None:
+        st.info(f"Using uploaded maze: {uploaded_file.name}")
+        pre_source = uploaded_file
+    else:
+        st.info(f"Loading maze: {selected_maze}")
+        pre_source = os.path.join(MAZE_DIR, selected_maze)
+
+    pre = None
     try:
+        pre = Preprocess(pre_source)
         pre.generate(margin=0.005, pix=0)
         env_temp = MazeEnv(pre)
     except Exception as e:
@@ -244,18 +318,40 @@ def main():
         st.header("1. Pathfinding Algorithms (Benchmark)")
         pathfinding_container = st.container()
         
-        with st.spinner("Running Pathfinding Algorithms..."):
+        # Prepare maze identifier and check for existing pretrained q-tables
+        try:
+            maze_id = os.path.splitext(selected_maze)[0] if selected_maze else os.path.splitext(uploaded_file.name)[0]
+        except Exception:
+            maze_id = 'uploaded_maze'
+
+        qtable_dir = os.path.join('models', 'qtables')
+        os.makedirs(qtable_dir, exist_ok=True)
+        qtable_path = os.path.join(qtable_dir, f"{maze_id}_qtable.npz")
+
+        loaded_qtable = None
+        if os.path.exists(qtable_path):
+            try:
+                npz = np.load(qtable_path, allow_pickle=True)
+                loaded_qtable = {
+                    'q_table': npz['q_table'],
+                    'goal': (int(npz['goal_r'].tolist()), int(npz['goal_c'].tolist()))
+                }
+                st.sidebar.info(f"Found pretrained q-table for maze '{maze_id}' (goal={loaded_qtable['goal']}).")
+            except Exception as e:
+                st.sidebar.warning(f"Failed to load pretrained q-table: {e}")
+        with st.spinner("Running Pathfinding Algorithms (A* only)..."):
             pathfinder = PathfindingAlgorithms(env)
-            
-            # 🟢 FIX: Capture the returned values (time, path)
-            d_time, d_path = pathfinder.dijkstra_search()
+
+            # Run only A* search as requested
             a_time, a_path = pathfinder.a_star_search()
-            b_time, b_path = pathfinder.bi_directional_search()
-            
-            # Store results using the captured local variables
-            ALGO_RESULTS['Dijkstra’s'] = {'Time': d_time, 'Path': d_path, 'Length': len(d_path) - 1 if d_path else 'Not Found', 'Type': 'Pathfinding'}
-            ALGO_RESULTS['A* Search'] = {'Time': a_time, 'Path': a_path, 'Length': len(a_path) - 1 if a_path else 'Not Found', 'Type': 'Pathfinding'}
-            ALGO_RESULTS['Bi-Directional Search'] = {'Time': b_time, 'Path': b_path, 'Length': len(b_path) - 1 if b_path else 'Not Found', 'Type': 'Pathfinding'}
+
+            # Store only A* result for benchmark
+            ALGO_RESULTS['A* Search'] = {
+                'Time': a_time,
+                'Path': a_path,
+                'Length': len(a_path) - 1 if a_path else 'Not Found',
+                'Type': 'Pathfinding'
+            }
 
         df_pathfinding = pd.DataFrame.from_dict(ALGO_RESULTS, orient='index')
         pathfinding_lengths = df_pathfinding[df_pathfinding['Type'] == 'Pathfinding']
@@ -264,14 +360,67 @@ def main():
         optimal_benchmark = valid_lengths.min() if not valid_lengths.empty else "Not Found"
         
         pathfinding_container.success(f"Benchmark Optimal Path Length: **{optimal_benchmark}** steps.")
+        # --- Auto-Pretrain Q-Learning to the benchmark optimal path ---
+        pretrained_q_table = None
+        # If we have an on-disk q-table for this maze and the saved goal matches the current goal, reuse it
+        if loaded_qtable is not None and loaded_qtable['goal'] == env.goal_coords:
+            pretrained_q_table = loaded_qtable['q_table']
+            st.sidebar.success('Loaded pretrained q-table that matches the current goal. It will be applied to the Q-Learning agent.')
+
+        # Otherwise, if there's no matching q-table but we have an optimal benchmark, train and save
+        if pretrained_q_table is None and optimal_benchmark != "Not Found":
+            st.info("Pretraining Q-Learning agent to reach the optimal path (this may take a while)...")
+            with st.container():
+                pretrain_sub = st.empty()
+                pretrain_progress = st.progress(0)
+                pretrain_status = st.empty()
+
+            # Use a larger number of episodes for full training; cap for safety
+            PRETRAIN_EPISODES = max(10000, int(num_episodes) * 5)
+
+            # Initialize a fresh Q-Learning agent for pretraining (or start from loaded_qtable if available)
+            q_pretrain_agent = QLearningAgent(env, alpha=alpha, gamma=gamma, epsilon=1.0, min_epsilon=0.01, epsilon_decay=EPSILON_DECAY)
+            if loaded_qtable is not None:
+                # Start from the loaded q-table to accelerate convergence (fine-tuning)
+                try:
+                    q_pretrain_agent.q_table = loaded_qtable['q_table'].copy()
+                    pretrain_status.info('Starting fine-tuning from existing q-table (goal differs).')
+                except Exception:
+                    pass
+
+            # Train until it finds the optimal path or reaches episode cap
+            pre_path, pre_duration = train_step_rl_agent_streamlit(env, q_pretrain_agent, PRETRAIN_EPISODES, 'Q-Learning', optimal_benchmark, pretrain_progress, pretrain_status)
+
+            if pre_path:
+                pretrain_status.success(f"Pretraining reached optimal policy in {pre_duration:.2f}s. Saved learned Q-table.")
+                pretrained_q_table = q_pretrain_agent.q_table.copy()
+
+                # Persist q-table to models/qtables for reuse across runs (save goal metadata)
+                try:
+                    import numpy as _np
+                    _np.savez(qtable_path, q_table=pretrained_q_table, goal_r=int(env.goal_coords[0]), goal_c=int(env.goal_coords[1]))
+                except Exception as e:
+                    st.warning(f"Failed to save q-table to disk: {e}")
+            else:
+                pretrain_status.error("Pretraining did not reach the optimal path within the episode cap.")
         
-        
+        # Remove the A* benchmark result from ALGO_RESULTS so it is not shown in the
+        # final comparison table or path visualizations (user requested only Q-Learning visuals)
+        benchmark_result = ALGO_RESULTS.pop('A* Search', None)
+
         # --- 4. RL Agent Training (Sequential Check with Early Exit) ---
         st.header("2. Reinforcement Learning Agents")
         progress_container = st.container()
         
         # 🟢 FIX: Pass the UI-defined local variables (alpha, gamma) to the function
         agents, _ = get_algorithm_functions(env, alpha, gamma, EPSILON_DECAY)
+        # If we have a pretrained q-table from the benchmark, apply it to the Q-Learning agent
+        if 'Q-Learning' in agents and pretrained_q_table is not None:
+            try:
+                agents['Q-Learning'].q_table = pretrained_q_table.copy()
+                st.sidebar.success('Applied pretrained Q-table to Q-Learning agent.')
+            except Exception as e:
+                st.sidebar.warning(f'Failed to apply pretrained q-table to agent: {e}')
         
         rl_order = ['Q-Learning', 'SARSA', 'Monte Carlo']
         
@@ -338,14 +487,24 @@ def main():
         
         for i, (name, result) in enumerate(ALGO_RESULTS.items()):
             with cols[i]:
-                plot_path_on_maze(
-                    env.maze, 
-                    result['Path'], 
-                    env.start_coords, 
-                    env.goal_coords, 
-                    f"{name} (L:{result['Length']})",
-                    result['Type']
-                )
+                # Prefer animated GIF showing the path being built step-by-step
+                gif_bytes = None
+                try:
+                    gif_bytes = create_path_gif(env.maze, result['Path'], env.start_coords, env.goal_coords, result['Type'], duration=120)
+                except Exception as e:
+                    st.warning(f"Failed to create GIF for {name}: {e}")
+
+                if gif_bytes:
+                    st.image(gif_bytes, caption=f"{name} (L:{result['Length']})", use_container_width=True)
+                else:
+                    plot_path_on_maze(
+                        env.maze,
+                        result['Path'],
+                        env.start_coords,
+                        env.goal_coords,
+                        f"{name} (L:{result['Length']})",
+                        result['Type']
+                    )
 
 
 if __name__ == "__main__":
