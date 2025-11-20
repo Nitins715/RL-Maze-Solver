@@ -315,7 +315,7 @@ def main():
         ALGO_RESULTS = {}
         
         # --- 3. Pathfinding Solver (Benchmark Set) ---
-        st.header("1. Pathfinding Algorithms (Benchmark)")
+        st.header("1. Pathfinding (Benchmark)")
         pathfinding_container = st.container()
         
         # Prepare maze identifier and check for existing pretrained q-tables
